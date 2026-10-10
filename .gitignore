@@ -1,0 +1,5 @@
+raw_videos/
+processed/
+urls.txt
+__pycache__/
+*.zip
