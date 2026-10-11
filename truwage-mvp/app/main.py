@@ -1,16 +1,19 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from app import schemas
 from app.deepfake_detector import integrity_checker
+from app.aqa_service import get_demo_aqa_score # <-- NEW
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles # <-- NEW
 from contextlib import asynccontextmanager
 import logging
-# Set up logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 import shutil
 import uuid
 import os
-import uuid
+import base64 # <-- NEW
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -40,11 +43,24 @@ app = FastAPI(
 # Allow Balraj's frontend to talk to your backend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # In production, restrict this. For MVP hackathon, "*" is fine.
+    allow_origins=["*"], # In production, restrict this. 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Allow Balraj's frontend to talk to your backend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], 
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# --- NEW: Create and mount the heatmaps folder ---
+os.makedirs(os.path.join(os.path.dirname(__file__), "../../heatmaps"), exist_ok=True)
+app.mount("/heatmaps", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "../../heatmaps")), name="heatmaps")
 
 # --- 1. Check Integrity Endpoint (Deepfake Detection) ---
 @app.post("/check_integrity", response_model=schemas.IntegrityCheckResponse)
@@ -152,6 +168,26 @@ async def upload_video(
 def read_root():
     return {"message": "TruWage Backend is running!"}
 
+
+def get_heatmap_base64(image_relative_path: str) -> str:
+    """
+    Reads the heatmap image from the ROOT directory and converts to Base64.
+    """
+    root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+    full_image_path = os.path.join(root_dir, image_relative_path)
+    
+    try:
+        if os.path.exists(full_image_path):
+            with open(full_image_path, "rb") as image_file:
+                encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
+            return f"data:image/png;base64,{encoded_string}"
+        else:
+            logger.warning(f"Heatmap image not found at: {full_image_path}")
+            return ""
+    except Exception as e:
+        logger.error(f"Failed to encode heatmap: {str(e)}")
+        return ""
+
 @app.post("/api/assess", response_model=schemas.AssessResponse)
 async def assess_video(
     file: UploadFile = File(...),
@@ -184,28 +220,44 @@ async def assess_video(
         # 3. Run the Deepfake Check
         integrity_result = integrity_checker.predict(file_path)
         
-        # 4. Format the response
+        # 4. Format the response if FAKE (Fixed the bug here!)
         if not integrity_result["is_authentic"]:
             logger.warning(f"Video failed integrity check: {integrity_result['message']}")
             return schemas.AssessResponse(
-            deepfake_status="PASS",
-            score=integrity_result["confidence_score"],
-            heatmap=None,  # <-- CHANGE THIS TO NONE
-            wage_range_text=f"₹{int(min_wage)} - ₹{int(max_wage)}",
-            audio_filepath=None # <-- CHANGE THIS TO NONE
-        )
+                deepfake_status="FAIL",
+                score=integrity_result["confidence_score"],
+                heatmap=None,  
+                wage_range_text="N/A",
+                audio_filepath=None 
+            )
         
-        # 5. Calculate mock wage
+        # 5. Get AQA Score & Heatmap Path from Ayansh's mapping
+        aqa_result = get_demo_aqa_score(file.filename)
+        
+        # Flexible key checking
+        aqa_score = aqa_result.get("aqa_score", aqa_result.get("score", 0.85))
+        
+        # --- FIX: Normalize score if Ayansh used a 0-100 scale ---
+        if aqa_score > 1.0:
+            aqa_score = round(aqa_score / 100.0, 2)
+        # --------------------------------------------------------
+        
+        heatmap_relative_path = aqa_result.get("heatmap_path", "explain/default/contact_sheet.png")
+        
+        # Convert the real heatmap to Base64 for Balraj's frontend
+        heatmap_base64 = get_heatmap_base64(heatmap_relative_path)
+        
+        # 6. Calculate mock wage
         base_wage = 500
         min_wage = base_wage * (complexity * 0.5)
         max_wage = min_wage * 1.2
         
-        logger.info(f"Video passed integrity check. Score: {integrity_result['confidence_score']}")
+        logger.info(f"Video passed integrity check. AQA Score: {aqa_score}")
         
         return schemas.AssessResponse(
             deepfake_status="PASS",
-            score=integrity_result["confidence_score"],
-            heatmap="https://via.placeholder.com/400x300.png?text=Grad-CAM+Heatmap+Coming+Soon",
+            score=aqa_score,
+            heatmap=heatmap_base64, # <-- NOW USES THE REAL BASE64 HEATMAP!
             wage_range_text=f"₹{int(min_wage)} - ₹{int(max_wage)}",
             audio_filepath="https://www.soundjay.com/buttons/sounds/button-09.mp3"
         )
