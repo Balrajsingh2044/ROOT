@@ -1,0 +1,23 @@
+{
+  "video_id": "carpentry_008",
+  "score": 0.2162,
+  "score_source": "model",
+  "poor_below": 0.5,
+  "poor_frames": [
+    37,
+    56,
+    112,
+    130,
+    261,
+    280
+  ],
+  "poor_timestamps_sec": [
+    2.47,
+    3.73,
+    7.47,
+    8.67,
+    17.4,
+    18.67
+  ],
+  "model_trained": true
+}

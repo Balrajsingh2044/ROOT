@@ -1,0 +1,31 @@
+{
+  "video_id": "plumbing_001",
+  "score": 0.4649,
+  "score_source": "model",
+  "poor_below": 0.5,
+  "poor_frames": [
+    114,
+    143,
+    229,
+    258,
+    286,
+    315,
+    344,
+    372,
+    401,
+    430
+  ],
+  "poor_timestamps_sec": [
+    7.6,
+    9.53,
+    15.27,
+    17.2,
+    19.07,
+    21.0,
+    22.93,
+    24.8,
+    26.73,
+    28.67
+  ],
+  "model_trained": true
+}

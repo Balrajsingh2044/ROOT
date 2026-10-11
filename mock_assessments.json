@@ -1,0 +1,38 @@
+{
+    "carpentry_001.mp4": {
+        "aqa_score": 87.5,
+        "heatmap_path": "explain/carpentry_001/contact_sheet.png"
+    },
+    "carpentry_002.mp4": {
+        "aqa_score": 75.0,
+        "heatmap_path": "explain/carpentry_002/contact_sheet.png"
+    },
+    "carpentry_003.mp4": {
+        "aqa_score": 62.5,
+        "heatmap_path": "explain/carpentry_003/contact_sheet.png"
+    },
+    "carpentry_004.mp4": {
+        "aqa_score": 12.5,
+        "heatmap_path": "explain/carpentry_004/contact_sheet.png"
+    },
+    "carpentry_005.mp4": {
+        "aqa_score": 50.0,
+        "heatmap_path": "explain/carpentry_005/contact_sheet.png"
+    },
+    "carpentry_006.mp4": {
+        "aqa_score": 50.0,
+        "heatmap_path": "explain/carpentry_006/contact_sheet.png"
+    },
+    "carpentry_007.mp4": {
+        "aqa_score": 50.0,
+        "heatmap_path": "explain/carpentry_007/contact_sheet.png"
+    },
+    "carpentry_008.mp4": {
+        "aqa_score": 0.0,
+        "heatmap_path": "explain/carpentry_008/contact_sheet.png"
+    },
+    "plumbing_001.mp4": {
+        "aqa_score": 50.0,
+        "heatmap_path": "explain/plumbing_001/contact_sheet.png"
+    }
+}
