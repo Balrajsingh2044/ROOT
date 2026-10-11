@@ -11,6 +11,8 @@ import shutil
 import uuid
 import os
 import uuid
+from fastapi.staticfiles import StaticFiles
+from app.aqa_service import get_demo_aqa_score
 
 
 @asynccontextmanager
@@ -45,6 +47,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Create a folder to hold heatmaps at the ROOT level
+os.makedirs(os.path.join(os.path.dirname(__file__), "../../heatmaps"), exist_ok=True)
+
+# Tell FastAPI to serve files from the ROOT/heatmaps folder
+app.mount("/heatmaps", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "../../heatmaps")), name="heatmaps")
 
 # --- 1. Check Integrity Endpoint (Deepfake Detection) ---
 @app.post("/check_integrity", response_model=schemas.IntegrityCheckResponse)
@@ -159,7 +167,7 @@ async def assess_video(
     complexity: int = 3
 ):
     """
-    The Master Endpoint for Balraj's Frontend.
+    The Master Endpoint for Frontend.
     """
     video_id = str(uuid.uuid4())
     file_path = None
@@ -181,31 +189,37 @@ async def assess_video(
         
         logger.info(f"Video saved to {file_path}")
         
-        # 3. Run the Deepfake Check
+        # 3. Run the Deepfake Check (Your 3D CNN)
         integrity_result = integrity_checker.predict(file_path)
         
-        # 4. Format the response
+        # 4. Format the response if FAKE
         if not integrity_result["is_authentic"]:
             logger.warning(f"Video failed integrity check: {integrity_result['message']}")
+            # set to FAIL, and don't calculate wage/heatmap
             return schemas.AssessResponse(
-            deepfake_status="PASS",
-            score=integrity_result["confidence_score"],
-            heatmap=None,  # <-- CHANGE THIS TO NONE
-            wage_range_text=f"₹{int(min_wage)} - ₹{int(max_wage)}",
-            audio_filepath=None # <-- CHANGE THIS TO NONE
-        )
+                deepfake_status="FAIL",
+                score=integrity_result["confidence_score"],
+                heatmap=None,  
+                wage_range_text="N/A",
+                audio_filepath=None 
+            )
         
-        # 5. Calculate mock wage
+        # 5. Get AQA Score from pre-computed data (INSTANT & CRASH-PROOF)
+        aqa_result = get_demo_aqa_score(file.filename)
+        aqa_score = aqa_result.get("score", 0.88)
+        
+        # 6. Calculate mock wage
         base_wage = 500
         min_wage = base_wage * (complexity * 0.5)
         max_wage = min_wage * 1.2
         
-        logger.info(f"Video passed integrity check. Score: {integrity_result['confidence_score']}")
+        logger.info(f"Video passed integrity check. AQA Score: {aqa_score}")
         
         return schemas.AssessResponse(
             deepfake_status="PASS",
-            score=integrity_result["confidence_score"],
-            heatmap="https://via.placeholder.com/400x300.png?text=Grad-CAM+Heatmap+Coming+Soon",
+            score=aqa_score, # Uses Ayansh's pre-computed score!
+            # TODO: Update this URL once Ayansh pushes the actual .png heatmap files
+            heatmap="http://127.0.0.1:8000/heatmaps/demo_heatmap.png", 
             wage_range_text=f"₹{int(min_wage)} - ₹{int(max_wage)}",
             audio_filepath="https://www.soundjay.com/buttons/sounds/button-09.mp3"
         )
