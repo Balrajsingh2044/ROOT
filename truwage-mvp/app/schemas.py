@@ -46,6 +46,6 @@ class AssessResponse(BaseModel):
     """
     deepfake_status: str      # e.g., "PASS" or "FAIL"
     score: float              # e.g., 0.92
-    heatmap: str              # URL or base64 string of the heatmap image (Ayansh will provide this later)
+    heatmap: Optional[str] = None              # URL or base64 string of the heatmap image (Ayansh will provide this later)
     wage_range_text: str      # e.g., "₹500 - ₹600"
-    audio_filepath: str       # URL or local path to the TTS audio file (Balraj will provide this later)
+    audio_filepath: Optional[str] = None       # URL or local path to the TTS audio file (Balraj will provide this later)

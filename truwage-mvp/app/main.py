@@ -1,4 +1,5 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.concurrency import run_in_threadpool  # CHANGED: run heavy model calls in a thread
 from app import schemas
 from app.deepfake_detector import integrity_checker
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,9 +11,16 @@ logger = logging.getLogger(__name__)
 import shutil
 import uuid
 import os
-import uuid
 from fastapi.staticfiles import StaticFiles
-from app.aqa_service import get_demo_aqa_score
+import sys
+from fastapi.concurrency import run_in_threadpool
+
+AQA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../indic-skill-100"))
+sys.path.insert(0, AQA_DIR)
+from gradcam_aqa import assess_video as run_aqa
+
+# CHANGED: added .webm so webcam recordings are accepted
+ALLOWED_VIDEO_EXTENSIONS = ('.mp4', '.avi', '.mov', '.mkv', '.webm')
 
 
 @asynccontextmanager
@@ -54,25 +62,21 @@ os.makedirs(os.path.join(os.path.dirname(__file__), "../../heatmaps"), exist_ok=
 # Tell FastAPI to serve files from the ROOT/heatmaps folder
 app.mount("/heatmaps", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "../../heatmaps")), name="heatmaps")
 
+
+# CHANGED: helper that saves an uploaded video to a temp file (replaces duplicated save code)
+def save_upload(file: UploadFile, video_id: str) -> str:
+    temp_dir = "temp_uploads"
+    os.makedirs(temp_dir, exist_ok=True)
+    file_path = os.path.join(temp_dir, f"{video_id}_{file.filename}")
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    return file_path
+
+
 # --- 1. Check Integrity Endpoint (Deepfake Detection) ---
-@app.post("/check_integrity", response_model=schemas.IntegrityCheckResponse)
-async def check_integrity(video_id: str, file_path: str):
-    """
-    Day 2 Update: Uses the pre-trained 3D CNN + heuristic to check video integrity.
-    """
-    # Check if file exists
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="Video file not found")
-    
-    # Run the AI check
-    result = integrity_checker.predict(file_path)
-    
-    return schemas.IntegrityCheckResponse(
-        video_id=video_id,
-        is_authentic=result["is_authentic"],
-        confidence_score=result["confidence_score"],
-        message=result["message"]
-    )  
+# CHANGED: the public /check_integrity route was removed because it accepted an arbitrary
+# file_path from the client (arbitrary file read risk). The integrity check now runs
+# directly via integrity_checker.predict() inside the endpoints below.
 
 # --- 2. Get Wage Endpoint (GNN Fair-Wage Engine) ---
 @app.post("/get_wage", response_model=schemas.WagePredictionResponse)
@@ -110,8 +114,8 @@ def health_check():
 @app.post("/upload_video", response_model=schemas.FullPipelineResponse)
 async def upload_video(
     file: UploadFile = File(...),
-    task_type: str = "plumbing",
-    complexity: int = 3
+    task_type: str = Form("plumbing"),   # CHANGED: Form so it's read from the form data
+    complexity: int = Form(3)            # CHANGED: Form so it's read from the form data
 ):
     """
     Main pipeline: Saves video, checks integrity, short-circuits if fake, else predicts wage.
@@ -119,41 +123,43 @@ async def upload_video(
     video_id = str(uuid.uuid4())
     
     # 1. Save the uploaded file temporarily
-    temp_dir = "temp_uploads"
-    os.makedirs(temp_dir, exist_ok=True)
-    file_path = os.path.join(temp_dir, f"{video_id}_{file.filename}")
+    file_path = save_upload(file, video_id)
     
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-    
-    # 2. Check Integrity using our new Day 2 model
-    integrity_result = await check_integrity(video_id=video_id, file_path=file_path)
-    
-    # 3. Short-circuit logic: If fake, DO NOT run the heavy AQA/Wage models
-    if not integrity_result.is_authentic:
-        # Clean up the file
-        os.remove(file_path)
+    try:
+        # 2. Check Integrity using our new Day 2 model
+        # CHANGED: runs in a thread, and calls the model directly (no /check_integrity route)
+        result = await run_in_threadpool(integrity_checker.predict, file_path)
+        integrity_result = schemas.IntegrityCheckResponse(
+            video_id=video_id,
+            is_authentic=result["is_authentic"],
+            confidence_score=result["confidence_score"],
+            message=result["message"]
+        )
+        
+        # 3. Short-circuit logic: If fake, DO NOT run the heavy AQA/Wage models
+        if not integrity_result.is_authentic:
+            return schemas.FullPipelineResponse(
+                integrity_check=integrity_result,
+                overall_status="FAILED_INTEGRITY_CHECK"
+            )
+        
+        # 4. If authentic, get wage prediction (Mock for now, Balraj will plug in GNN later)
+        wage_request = schemas.WageRequest(
+            task_type=task_type,
+            complexity=complexity,
+            location_demand="high"
+        )
+        wage_result = await get_wage(wage_request)
+        
         return schemas.FullPipelineResponse(
             integrity_check=integrity_result,
-            overall_status="FAILED_INTEGRITY_CHECK"
+            wage_prediction=wage_result,
+            overall_status="SUCCESS"
         )
-    
-    # 4. If authentic, get wage prediction (Mock for now, Balraj will plug in GNN later)
-    wage_request = schemas.WageRequest(
-        task_type=task_type,
-        complexity=complexity,
-        location_demand="high"
-    )
-    wage_result = await get_wage(wage_request)
-    
-    # Clean up the file after processing
-    os.remove(file_path)
-    
-    return schemas.FullPipelineResponse(
-        integrity_check=integrity_result,
-        wage_prediction=wage_result,
-        overall_status="SUCCESS"
-    )
+    finally:
+        # Clean up the file after processing (CHANGED: now also runs on fake videos and errors)
+        if os.path.exists(file_path):
+            os.remove(file_path)
 
 # --- Health Check (Good practice for debugging) ---
 @app.get("/")
@@ -163,8 +169,8 @@ def read_root():
 @app.post("/api/assess", response_model=schemas.AssessResponse)
 async def assess_video(
     file: UploadFile = File(...),
-    task_type: str = "plumbing",
-    complexity: int = 3
+    task_type: str = Form("plumbing"),   # CHANGED: Form so the dashboard's values are actually received
+    complexity: int = Form(3)            # CHANGED: Form so the dashboard's values are actually received
 ):
     """
     The Master Endpoint for Frontend.
@@ -176,21 +182,17 @@ async def assess_video(
         logger.info(f"Received video upload: {file.filename}")
         
         # 1. Validate file type
-        if not file.filename.lower().endswith(('.mp4', '.avi', '.mov', '.mkv')):
+        if not file.filename.lower().endswith(ALLOWED_VIDEO_EXTENSIONS):
             raise HTTPException(status_code=400, detail="Invalid file type. Please upload a video file.")
         
         # 2. Save the uploaded file temporarily
-        temp_dir = "temp_uploads"
-        os.makedirs(temp_dir, exist_ok=True)
-        file_path = os.path.join(temp_dir, f"{video_id}_{file.filename}")
-        
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+        file_path = save_upload(file, video_id)
         
         logger.info(f"Video saved to {file_path}")
         
         # 3. Run the Deepfake Check (Your 3D CNN)
-        integrity_result = integrity_checker.predict(file_path)
+        # CHANGED: runs in a thread so the server isn't blocked during inference
+        integrity_result = await run_in_threadpool(integrity_checker.predict, file_path)
         
         # 4. Format the response if FAKE
         if not integrity_result["is_authentic"]:
@@ -204,9 +206,10 @@ async def assess_video(
                 audio_filepath=None 
             )
         
-        # 5. Get AQA Score from pre-computed data (INSTANT & CRASH-PROOF)
-        aqa_result = get_demo_aqa_score(file.filename)
-        aqa_score = aqa_result.get("score", 0.88)
+        # 5. Real AQA score + Grad-CAM heatmap computed from THIS video
+        aqa = await run_in_threadpool(run_aqa, file_path)
+        aqa_score = aqa["score"]      # 0–1
+        heatmap = aqa["heatmap"]      # base64 data-URI (jpeg)
         
         # 6. Calculate mock wage
         base_wage = 500
@@ -217,9 +220,8 @@ async def assess_video(
         
         return schemas.AssessResponse(
             deepfake_status="PASS",
-            score=aqa_score, # Uses Ayansh's pre-computed score!
-            # TODO: Update this URL once Ayansh pushes the actual .png heatmap files
-            heatmap="http://127.0.0.1:8000/heatmaps/demo_heatmap.png", 
+            score=aqa_score,
+            heatmap=heatmap,
             wage_range_text=f"₹{int(min_wage)} - ₹{int(max_wage)}",
             audio_filepath="https://www.soundjay.com/buttons/sounds/button-09.mp3"
         )

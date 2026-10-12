@@ -13,20 +13,16 @@ def load_contrastive_results():
     return None
 
 def get_demo_aqa_score(video_filename: str):
-    """
-    Looks up the pre-computed score. 
-    For the live demo, this ensures instant, crash-proof responses.
-    """
     results = load_contrastive_results()
-    
+    default = {"score": 0.88}
     if not results:
-        return {"score": 0.88, "heatmap_url": "placeholder"}
-        
-    # Return the first available successful result 
-    # so the UI looks perfect during the live demo.
-    if isinstance(results, list) and len(results) > 0:
-        return results[0] 
-    elif isinstance(results, dict):
-        return results
-        
-    return {"score": 0.88, "heatmap_url": "placeholder"}
+        return default
+    stem = os.path.splitext(video_filename)[0]
+    if isinstance(results, dict):
+        return results.get(stem, results)
+    if isinstance(results, list):
+        for r in results:
+            if stem in str(r.get("video", r.get("filename", ""))):
+                return r
+        return results[0] if results else default
+    return default
