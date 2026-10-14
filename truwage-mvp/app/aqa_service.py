@@ -1,28 +1,58 @@
-import json
-import os
+import sys
+from pathlib import Path
 
-# Calculate path: from 'app/' go up two levels to 'ROOT/', then down to 'indic-skill-100/features/'
-FEATURES_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../indic-skill-100/features"))
+# --- 1. Path Setup for AQA ---
+CURRENT_DIR = Path(__file__).resolve().parent
+ROOT_DIR = CURRENT_DIR.parent.parent # Points to your main 'indic' folder
+sys.path.append(str(ROOT_DIR / "indic-skill-100"))
 
-def load_contrastive_results():
-    """Loads Ayansh's pre-computed AQA results."""
-    json_path = os.path.join(FEATURES_DIR, "contrastive_results.json")
-    if os.path.exists(json_path):
-        with open(json_path, "r") as f:
-            return json.load(f)
-    return None
+# --- 2. Import AQA Overlay ---
+try:
+    from aqa_overlay import assess_video, warmup
+    warmup() # Load the VideoMAE model into memory once at startup
+except ImportError as e:
+    print(f"WARNING: Could not import aqa_overlay. Error: {e}")
+    assess_video = None
 
-def get_demo_aqa_score(video_filename: str):
-    results = load_contrastive_results()
-    default = {"score": 0.88}
-    if not results:
-        return default
-    stem = os.path.splitext(video_filename)[0]
-    if isinstance(results, dict):
-        return results.get(stem, results)
-    if isinstance(results, list):
-        for r in results:
-            if stem in str(r.get("video", r.get("filename", ""))):
-                return r
-        return results[0] if results else default
-    return default
+# --- 3. Import the New Wage Engine ---
+try:
+    from wage_engine import predict_wage
+except ImportError:
+    # Fallback if wage_engine.py is missing
+    def predict_wage(skill_score, complexity, demand):
+        return "₹150 - ₹200/hr", "85% (Mock)"
+
+# --- 4. Main API Function ---
+def get_aqa_result(video_path: str, filename: str = "unknown.mp4"):
+    """
+    Processes the video and returns the complete JSON contract for the frontend.
+    """
+    if assess_video is None:
+        return {"error": "AQA module not loaded", "score": 0.0}
+
+    try:
+        # A. Get AQA Score and Heatmap from your Day 4 script
+        result = assess_video(video_path, heatmap_format="data-uri")
+        score = float(result.get("score", 0.5))
+        heatmap = result.get("heatmap", "")
+
+        # B. Calculate Dynamic Wage based on the ACTUAL AQA score
+        # (Complexity and Demand default to 3, but can be passed from frontend later)
+        wage_range, wage_confidence = predict_wage(skill_score=score, complexity=3, demand=3)
+
+        # C. Integrity Check (Placeholder for Phase 4 Heuristics)
+        # We will wire in the real integrity_checker.py in the next hour
+        integrity_status = "PASSED" 
+
+        # D. Return the complete JSON contract
+        return {
+            "score": round(score, 4),
+            "heatmap": heatmap,
+            "wage_range": wage_range,
+            "wage_confidence": wage_confidence,
+            "integrity_status": integrity_status
+        }
+        
+    except Exception as e:
+        print(f"Error in get_aqa_result: {e}")
+        return {"error": str(e), "score": 0.0, "heatmap": ""}
