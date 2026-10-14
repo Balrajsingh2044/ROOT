@@ -1,9 +1,0 @@
-{
-  "video_id": "d5ae0046-9561-4c45-8aec-6d1d39287bab_carpenter_003",
-  "score": 0.7541,
-  "score_source": "model",
-  "poor_below": 0.5,
-  "poor_frames": [],
-  "poor_timestamps_sec": [],
-  "model_trained": true
-}

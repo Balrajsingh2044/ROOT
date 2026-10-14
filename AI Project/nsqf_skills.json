@@ -1,7 +1,0 @@
-{
-  "plumbing": {"level": 2, "tasks": ["pipe fitting", "leak repair"], "keywords": ["paip", "nal", "plumb", "प्लंबिंग"]},
-  "electrical": {"level": 3, "tasks": ["wiring", "socket repair"], "keywords": ["wire", "bijli", "socket", "वायरिंग"]},
-  "carpentry": {"level": 2, "tasks": ["wood cutting", "furniture assembly"], "keywords": ["lakdi", "furniture", "badhai", "लकड़ी"]},
-  "welding": {"level": 3, "tasks": ["metal joining", "grinding"], "keywords": ["weld", "metal", "loha", "वेल्डिंग"]},
-  "tailoring": {"level": 2, "tasks": ["stitching", "measurement"], "keywords": ["silai", "kapda", "darji", "सिलाई"]}
-}

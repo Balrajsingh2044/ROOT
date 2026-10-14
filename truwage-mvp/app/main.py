@@ -1,238 +1,213 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from fastapi.concurrency import run_in_threadpool  # CHANGED: run heavy model calls in a thread
-from app import schemas
-from app.deepfake_detector import integrity_checker
-from fastapi.middleware.cors import CORSMiddleware
-from contextlib import asynccontextmanager
+"""TruWage backend.
+
+Pipeline for /api/assess:
+  upload -> integrity check -> AQA score + Grad-CAM heatmap -> wage range -> skill card -> passport
+"""
 import logging
-# Set up logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-import shutil
-import uuid
 import os
-from fastapi.staticfiles import StaticFiles
 import sys
+import uuid
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
-AQA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../indic-skill-100"))
-sys.path.insert(0, AQA_DIR)
-from gradcam_aqa import assess_video as run_aqa
+from app import schemas
+from app.integrity_checker import integrity_checker
+from app.nsqf_mapper import map_skills
+from app.passport import build_passport, sha256_file
+from app.wage_engine import demand_from_label, predict_wage
 
-# CHANGED: added .webm so webcam recordings are accepted
-ALLOWED_VIDEO_EXTENSIONS = ('.mp4', '.avi', '.mov', '.mkv', '.webm')
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("truwage")
+
+APP_DIR = Path(__file__).resolve().parent
+BACKEND_DIR = APP_DIR.parent
+REPO_ROOT = BACKEND_DIR.parent
+TEMP_DIR = BACKEND_DIR / "temp_uploads"
+PASSPORT_DIR = BACKEND_DIR / "passports"
+TEMP_DIR.mkdir(exist_ok=True)
+PASSPORT_DIR.mkdir(exist_ok=True)
+
+# The AQA model lives in indic-skill-100/. If it cannot be loaded (for example transformers is
+# not installed), the server still starts and /api/assess answers with a clear 503.
+sys.path.insert(0, str(REPO_ROOT / "indic-skill-100"))
+try:
+    from gradcam_aqa import assess_video as run_aqa
+except Exception as exc:  # noqa: BLE001
+    run_aqa = None
+    logger.warning("AQA model unavailable: %s", exc)
+
+ALLOWED_VIDEO_EXTENSIONS = (".mp4", ".avi", ".mov", ".mkv", ".webm")
+MAX_UPLOAD_MB = 100
+
+DEFAULT_ORIGINS = "http://localhost:8501,http://127.0.0.1:8501,http://localhost:7860,http://127.0.0.1:7860"
+ALLOWED_ORIGINS = [o.strip() for o in os.environ.get("TRUWAGE_CORS_ORIGINS", DEFAULT_ORIGINS).split(",") if o.strip()]
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Lifespan event: Runs once on startup and once on shutdown.
-    """
-    # Startup: Load models
-    logger.info("Starting up: Loading AI models...")
-    # The integrity_checker is already loaded at module level, but we can add more models here later
-    logger.info("All models loaded successfully!")
-    
-    yield  # This is where the app runs
-    
-    # Shutdown: Clean up
-    logger.info("Shutting down: Cleaning up resources...")
-    # If we had database connections or other resources, we'd close them here
+    logger.info("Warming up the wage model...")
+    await run_in_threadpool(predict_wage, 0.5, 3, 3)
+    logger.info("AQA model available: %s", run_aqa is not None)
+    yield
 
-# Initialize the FastAPI app
+
 app = FastAPI(
     title="TruWage MVP Backend",
-    description="API for Video Integrity, AQA, and Fair Wage Prediction",
-    version="1.0.0",
-    lifespan = lifespan 
+    description="Video integrity check, technique scoring (AQA), fair-wage range, skill card and passport",
+    version="1.1.0",
+    lifespan=lifespan,
 )
 
-# Allow Balraj's frontend to talk to your backend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # In production, restrict this. For MVP hackathon, "*" is fine.
-    allow_credentials=True,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Create a folder to hold heatmaps at the ROOT level
-os.makedirs(os.path.join(os.path.dirname(__file__), "../../heatmaps"), exist_ok=True)
-
-# Tell FastAPI to serve files from the ROOT/heatmaps folder
-app.mount("/heatmaps", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "../../heatmaps")), name="heatmaps")
+app.mount("/passports", StaticFiles(directory=str(PASSPORT_DIR)), name="passports")
 
 
-# CHANGED: helper that saves an uploaded video to a temp file (replaces duplicated save code)
-def save_upload(file: UploadFile, video_id: str) -> str:
-    temp_dir = "temp_uploads"
-    os.makedirs(temp_dir, exist_ok=True)
-    file_path = os.path.join(temp_dir, f"{video_id}_{file.filename}")
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-    return file_path
+def save_upload(file: UploadFile, video_id: str) -> Path:
+    """Save the upload under a generated name (never the client's filename) with a size limit."""
+    suffix = Path(file.filename or "").suffix.lower()
+    dest = TEMP_DIR / f"{video_id}{suffix}"
+    limit = MAX_UPLOAD_MB * 1024 * 1024
+    size, too_big = 0, False
+    with open(dest, "wb") as out:
+        while True:
+            chunk = file.file.read(1024 * 1024)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > limit:
+                too_big = True
+                break
+            out.write(chunk)
+    if too_big:  # delete after the file is closed (required on Windows)
+        dest.unlink(missing_ok=True)
+        raise HTTPException(status_code=413, detail=f"File too large. Maximum is {MAX_UPLOAD_MB} MB.")
+    return dest
 
 
-# --- 1. Check Integrity Endpoint (Deepfake Detection) ---
-# CHANGED: the public /check_integrity route was removed because it accepted an arbitrary
-# file_path from the client (arbitrary file read risk). The integrity check now runs
-# directly via integrity_checker.predict() inside the endpoints below.
-
-# --- 2. Get Wage Endpoint (GNN Fair-Wage Engine) ---
-@app.post("/get_wage", response_model=schemas.WagePredictionResponse)
-async def get_wage(request: schemas.WageRequest):
-    """
-    Dummy endpoint for Day 1.
-    Day 2/3 Goal: Replace with Bayesian GNN prediction logic.
-    """
-    # MOCK LOGIC: Simple hardcoded logic based on complexity
-    base_wage = 500
-    multiplier = request.complexity * 1.5
-    
-    min_wage = base_wage * multiplier
-    max_wage = min_wage * 1.2 # 20% upper bound for Bayesian range
-    
-    return schemas.WagePredictionResponse(
-        task_type=request.task_type,
-        estimated_wage_min=min_wage,
-        estimated_wage_max=max_wage,
-        confidence_interval="85% confidence (Monte Carlo Dropout)",
-        reasoning=f"Wage adjusted for {request.complexity}/5 complexity and {request.location_demand} local demand."
-    )
-# -- Health ---
-@app.get("/health")
-def health_check():
-    """
-    Simple health check endpoint. Balraj's frontend can ping this to verify backend is alive.
-    """
-    return {
-        "status": "healthy",
-        "message": "TruWage backend is running",
-        "models_loaded": True
-    }
-# --- 3. Full Pipeline Endpoint (Upload Video + Voice) ---
-@app.post("/upload_video", response_model=schemas.FullPipelineResponse)
-async def upload_video(
-    file: UploadFile = File(...),
-    task_type: str = Form("plumbing"),   # CHANGED: Form so it's read from the form data
-    complexity: int = Form(3)            # CHANGED: Form so it's read from the form data
-):
-    """
-    Main pipeline: Saves video, checks integrity, short-circuits if fake, else predicts wage.
-    """
-    video_id = str(uuid.uuid4())
-    
-    # 1. Save the uploaded file temporarily
-    file_path = save_upload(file, video_id)
-    
-    try:
-        # 2. Check Integrity using our new Day 2 model
-        # CHANGED: runs in a thread, and calls the model directly (no /check_integrity route)
-        result = await run_in_threadpool(integrity_checker.predict, file_path)
-        integrity_result = schemas.IntegrityCheckResponse(
-            video_id=video_id,
-            is_authentic=result["is_authentic"],
-            confidence_score=result["confidence_score"],
-            message=result["message"]
-        )
-        
-        # 3. Short-circuit logic: If fake, DO NOT run the heavy AQA/Wage models
-        if not integrity_result.is_authentic:
-            return schemas.FullPipelineResponse(
-                integrity_check=integrity_result,
-                overall_status="FAILED_INTEGRITY_CHECK"
-            )
-        
-        # 4. If authentic, get wage prediction (Mock for now, Balraj will plug in GNN later)
-        wage_request = schemas.WageRequest(
-            task_type=task_type,
-            complexity=complexity,
-            location_demand="high"
-        )
-        wage_result = await get_wage(wage_request)
-        
-        return schemas.FullPipelineResponse(
-            integrity_check=integrity_result,
-            wage_prediction=wage_result,
-            overall_status="SUCCESS"
-        )
-    finally:
-        # Clean up the file after processing (CHANGED: now also runs on fake videos and errors)
-        if os.path.exists(file_path):
-            os.remove(file_path)
-
-# --- Health Check (Good practice for debugging) ---
 @app.get("/")
 def read_root():
-    return {"message": "TruWage Backend is running!"}
+    return {"message": "TruWage backend is running"}
+
+
+@app.get("/health")
+def health_check():
+    return {"status": "healthy", "aqa_model_loaded": run_aqa is not None}
+
+
+@app.post("/get_wage", response_model=schemas.WagePredictionResponse)
+async def get_wage(request: schemas.WageRequest):
+    """Wage range for a given technique score, complexity and local demand."""
+    wage = predict_wage(request.skill_score, request.complexity, demand_from_label(request.location_demand))
+    return schemas.WagePredictionResponse(
+        task_type=request.task_type,
+        estimated_wage_min=wage["min"],
+        estimated_wage_max=wage["max"],
+        confidence_interval=f"{wage['confidence']} confidence (95% Monte-Carlo-dropout interval)",
+        reasoning=(f"Skill {request.skill_score:.2f}, complexity {request.complexity}/5, "
+                   f"{request.location_demand} local demand. Model trained on synthetic data."),
+    )
+
 
 @app.post("/api/assess", response_model=schemas.AssessResponse)
 async def assess_video(
     file: UploadFile = File(...),
-    task_type: str = Form("plumbing"),   # CHANGED: Form so the dashboard's values are actually received
-    complexity: int = Form(3)            # CHANGED: Form so the dashboard's values are actually received
+    task_type: str = Form("plumbing"),
+    complexity: int = Form(3, ge=1, le=5),
+    demand: str = Form("medium"),
+    worker_name: str = Form(""),
 ):
-    """
-    The Master Endpoint for Frontend.
-    """
     video_id = str(uuid.uuid4())
     file_path = None
-    
     try:
-        logger.info(f"Received video upload: {file.filename}")
-        
-        # 1. Validate file type
-        if not file.filename.lower().endswith(ALLOWED_VIDEO_EXTENSIONS):
+        if not (file.filename or "").lower().endswith(ALLOWED_VIDEO_EXTENSIONS):
             raise HTTPException(status_code=400, detail="Invalid file type. Please upload a video file.")
-        
-        # 2. Save the uploaded file temporarily
+        logger.info("Received upload %s", video_id)
         file_path = save_upload(file, video_id)
-        
-        logger.info(f"Video saved to {file_path}")
-        
-        # 3. Run the Deepfake Check (Your 3D CNN)
-        # CHANGED: runs in a thread so the server isn't blocked during inference
-        integrity_result = await run_in_threadpool(integrity_checker.predict, file_path)
-        
-        # 4. Format the response if FAKE
-        if not integrity_result["is_authentic"]:
-            logger.warning(f"Video failed integrity check: {integrity_result['message']}")
-            # set to FAIL, and don't calculate wage/heatmap
+
+        # 1. Integrity check (freeze / loop heuristic)
+        integrity = await run_in_threadpool(integrity_checker.predict, str(file_path))
+        if not integrity["is_authentic"]:
+            logger.warning("Integrity check failed: %s", integrity["message"])
             return schemas.AssessResponse(
                 deepfake_status="FAIL",
-                score=integrity_result["confidence_score"],
-                heatmap=None,  
+                score=integrity["confidence_score"],
+                heatmap=None,
                 wage_range_text="N/A",
-                audio_filepath=None 
+                audio_filepath=None,
+                integrity_message=integrity["message"],
             )
-        
-        # 5. Real AQA score + Grad-CAM heatmap computed from THIS video
-        aqa = await run_in_threadpool(run_aqa, file_path)
-        aqa_score = aqa["score"]      # 0–1
-        heatmap = aqa["heatmap"]      # base64 data-URI (jpeg)
-        
-        # 6. Calculate mock wage
-        base_wage = 500
-        min_wage = base_wage * (complexity * 0.5)
-        max_wage = min_wage * 1.2
-        
-        logger.info(f"Video passed integrity check. AQA Score: {aqa_score}")
-        
+
+        # 2. Technique score + Grad-CAM heatmap
+        if run_aqa is None:
+            raise HTTPException(status_code=503, detail="The AQA model is not available on this server. "
+                                                        "Install the requirements (transformers, torch) and restart.")
+        aqa = await run_in_threadpool(run_aqa, str(file_path))
+        score = min(1.0, max(0.0, float(aqa["score"])))
+
+        # 3. Wage range from the technique score
+        wage = await run_in_threadpool(predict_wage, score, complexity, demand_from_label(demand))
+
+        # 4. Skill card
+        card = map_skills("", task_type)
+
+        # 5. Passport (optional: a failure here must not break the assessment)
+        verification_hash, passport_url = None, None
+        try:
+            video_sha = await run_in_threadpool(sha256_file, file_path)
+            passport = await run_in_threadpool(
+                build_passport,
+                {
+                    "worker_name": worker_name.strip() or "Not provided",
+                    "trade": card["trade"],
+                    "nsqf_level": card["level_label"],
+                    "score": f"{score:.2f}",
+                    "integrity_status": "PASS",
+                    "wage_range": wage["text"],
+                    "wage_confidence": wage["confidence"],
+                },
+                video_sha, PASSPORT_DIR, video_id,
+            )
+            verification_hash = passport["short_hash"]
+            passport_url = f"/passports/{video_id}.html"
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Passport generation failed: %s", exc)
+
         return schemas.AssessResponse(
             deepfake_status="PASS",
-            score=aqa_score,
-            heatmap=heatmap,
-            wage_range_text=f"₹{int(min_wage)} - ₹{int(max_wage)}",
-            audio_filepath="https://www.soundjay.com/buttons/sounds/button-09.mp3"
+            score=round(score, 4),
+            heatmap=aqa.get("heatmap"),
+            wage_range_text=wage["text"],
+            audio_filepath=None,
+            integrity_message=integrity["message"],
+            trade=card["trade"],
+            nsqf_level=card["level_label"],
+            key_tasks=card["key_tasks"],
+            wage_min=wage["min"],
+            wage_max=wage["max"],
+            wage_confidence=wage["confidence"],
+            verification_hash=verification_hash,
+            passport_url=passport_url,
         )
-        
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error(f"Error processing video: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Error processing video: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Internal server error: {exc}")
     finally:
-        # Always clean up the file, even if there's an error
-        if file_path and os.path.exists(file_path):
-            os.remove(file_path)
-            logger.info(f"Cleaned up temporary file: {file_path}")
+        if file_path is not None and Path(file_path).exists():
+            try:
+                Path(file_path).unlink()
+            except OSError as exc:
+                logger.warning("Could not delete temp file: %s", exc)

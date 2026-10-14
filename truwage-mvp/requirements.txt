@@ -26,3 +26,9 @@ torchvision==0.29.1
 typing-inspection==0.4.4
 typing_extensions==4.16.0
 uvicorn==0.54.0
+transformers
+streamlit
+qrcode[pil]
+requests
+pytest
+httpx
