@@ -1,0 +1,19 @@
+{
+  "_disclaimer": "Illustrative placeholders. Verify trade names and levels against the official NSDC / NSQF Qualification Packs before relying on them.",
+  "plumbing": {"level": 2, "tasks": ["pipe fitting", "leak repair", "tap and fixture installation"],
+               "keywords": ["plumb", "plumber", "plumbing", "pipe", "paip", "nal", "nala", "tap", "leak", "leakage", "पाइप", "नल", "प्लंबर", "प्लंबिंग", "लीकेज"]},
+  "electrical": {"level": 3, "tasks": ["wiring", "socket and switch repair", "fuse and MCB fitting"],
+                 "keywords": ["electric", "electrician", "electrical", "wire", "wiring", "socket", "switch", "fuse", "mcb", "bijli", "बिजली", "वायरिंग", "सॉकेट", "इलेक्ट्रीशियन"]},
+  "carpentry": {"level": 2, "tasks": ["wood cutting", "joinery", "furniture assembly"],
+                "keywords": ["carpent", "carpenter", "carpentry", "wood", "furniture", "lakdi", "badhai", "लकड़ी", "बढ़ई", "फर्नीचर", "आरी"]},
+  "welding": {"level": 3, "tasks": ["arc welding", "metal joining", "grinding and finishing"],
+              "keywords": ["weld", "welder", "welding", "metal", "loha", "लोहा", "वेल्डिंग", "वेल्डर"]},
+  "tailoring": {"level": 2, "tasks": ["stitching", "measurement and cutting", "garment finishing"],
+                "keywords": ["tailor", "tailoring", "stitch", "stitching", "sew", "silai", "darji", "kapda", "सिलाई", "दर्जी", "कपड़ा"]},
+  "painting": {"level": 2, "tasks": ["surface preparation", "wall painting", "finishing"],
+               "keywords": ["paint", "painter", "painting", "putty", "rangai", "पेंट", "पेंटर", "रंगाई"]},
+  "masonry": {"level": 2, "tasks": ["bricklaying", "plastering", "tiling"],
+              "keywords": ["mason", "masonry", "brick", "plaster", "tile", "tiling", "mistri", "मिस्त्री", "राजमिस्त्री", "ईंट", "प्लास्टर"]},
+  "mechanic": {"level": 3, "tasks": ["engine servicing", "brake and clutch repair", "fault diagnosis"],
+               "keywords": ["mechanic", "engine", "brake", "clutch", "garage", "मैकेनिक", "इंजन", "गैराज"]}
+}
