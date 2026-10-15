@@ -30,7 +30,7 @@ with st.sidebar:
 col1, col2 = st.columns(2)
 with col1:
     worker_name = st.text_input("Worker name (optional)")
-    trade = st.selectbox("Trade", TRADES)
+    trade = st.selectbox("Trade shown in the video", TRADES, index=None, placeholder="Choose the trade (required)")
 with col2:
     complexity = st.slider("Task complexity", 1, 5, 3)
     demand = st.selectbox("Local demand", ["low", "medium", "high"], index=1)
@@ -39,7 +39,10 @@ video = st.file_uploader("Work video (15-30 seconds)", type=["mp4", "mov", "avi"
 if video is not None:
     st.video(video)
 
-if video is not None and st.button("Assess skill and estimate wage", type="primary"):
+if video is not None and trade is None:
+    st.info("Choose the trade shown in the video. The skill card and passport use this selection.")
+
+if video is not None and st.button("Assess skill and estimate wage", type="primary", disabled=trade is None):
     with st.spinner("Checking integrity, scoring technique, estimating wage... (the first run loads the model)"):
         try:
             resp = requests.post(
