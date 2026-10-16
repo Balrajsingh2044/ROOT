@@ -6,11 +6,15 @@ numpy
 opencv-python
 pillow
 torch
-torchvision
+torch_geometric
 transformers
 streamlit
 qrcode[pil]
 requests
+imageio-ffmpeg
+gtts
+soundfile
+scipy
+gradio
 pytest
 httpx
-imageio-ffmpeg
