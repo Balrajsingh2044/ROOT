@@ -130,6 +130,6 @@ Separate prototype scripts (run from `AI Project`): `gnn_wage.py`, `gnn_bayesian
 
 Data sources and licences: see `DATA_LICENSES.md`.
 
-## Team
+## Team TruWage
 
 Shreyansh Khatri (24BCE0541), Ayansh Agarwal (24BDS0166), Balraj Singh (24BCE0531)
